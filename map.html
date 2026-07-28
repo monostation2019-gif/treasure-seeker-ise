@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>トレジャーシーカー伊勢 | クリーンマップ</title>
+<title>ここナビ＆クリーン伊勢 | クリーンマップ</title>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -54,6 +54,25 @@
   .chip svg{width:13px; height:13px;}
   .chip.active{background:#fff; color:var(--forest-deep); border-color:#fff;}
   .chip-divider{flex-shrink:0; width:1px; align-self:stretch; background:rgba(255,255,255,0.3); margin:2px 0;}
+
+  .period-row{margin-top:8px;}
+  .period-toggle{display:flex; gap:6px;}
+  .period-btn{
+    flex:1; text-align:center; font-size:11.5px; font-weight:700;
+    color:#fff; background:rgba(255,255,255,0.14); border:1px solid rgba(255,255,255,0.32);
+    padding:7px 8px; border-radius:999px; cursor:pointer;
+  }
+  .period-btn.active{background:#fff; color:var(--forest-deep); border-color:#fff;}
+  .month-dots{display:flex; gap:8px; overflow-x:auto; padding-top:10px; scrollbar-width:none;}
+  .month-dots::-webkit-scrollbar{display:none;}
+  .month-dot{
+    flex-shrink:0; display:flex; flex-direction:column; align-items:center; gap:3px;
+    color:rgba(255,255,255,0.75); font-size:10.5px; cursor:pointer; padding:2px 4px;
+  }
+  .month-dot .dot{width:9px; height:9px; border-radius:50%; background:rgba(255,255,255,0.35);}
+  .month-dot.active{color:#fff; font-weight:700;}
+  .month-dot.active .dot{background:var(--gold);}
+  .month-dot.empty{opacity:0.4; cursor:default;}
 
   .map-wrap{flex:1; position:relative;}
   #map{position:absolute; inset:0;}
@@ -214,6 +233,13 @@
       <div class="chip" data-cat="歴史・文化">🏯 歴史・文化</div>
       <div class="chip" data-cat="おすすめ">⭐ おすすめ</div>
     </div>
+    <div class="period-row" id="periodRow">
+      <div class="period-toggle">
+        <button class="period-btn active" id="periodCurrentBtn" data-mode="current">今（直近30日）</button>
+        <button class="period-btn" id="periodTimelineBtn" data-mode="timeline">タイムライン</button>
+      </div>
+      <div class="month-dots" id="monthDots" style="display:none;"></div>
+    </div>
   </header>
 
   <div class="map-wrap">
@@ -322,6 +348,9 @@ const layerToggle = document.getElementById('layerToggle');
 const legendEl  = document.getElementById('heatLegend');
 const heatLegendTitleEl = document.getElementById('heatLegendTitle');
 const backBtn   = document.getElementById('backBtn');
+const periodCurrentBtn  = document.getElementById('periodCurrentBtn');
+const periodTimelineBtn = document.getElementById('periodTimelineBtn');
+const monthDotsEl       = document.getElementById('monthDots');
 
 const collectOverlay       = document.getElementById('collectOverlay');
 const collectCloseBtn      = document.getElementById('collectCloseBtn');
@@ -392,6 +421,76 @@ let activeCategory = 'all';
 let heatLayerGroup = null;
 let reportMarkerGroup = null; // 個別ゴミ地点タップ用（回収ボタンを出すため）
 const MARKER_MIN_ZOOM = 15; // 込み合い防止のため、ある程度ズームしてから個別ピンを表示する
+
+/* ---------------------------------------------------------------------
+   期間表示（今＝直近30日 / タイムライン＝月ごとの過去データ）
+   データそのものは削除せず、表示範囲だけを絞り込む方式。
+   --------------------------------------------------------------------- */
+let viewMode = 'current'; // 'current' | 'timeline'
+let selectedMonthKey = null; // 'YYYY-MM'（タイムライン表示中に選択中の月）
+
+function toDateSafe(ts){
+  if(!ts) return null;
+  if(typeof ts.toDate === 'function') return ts.toDate();
+  return null;
+}
+function monthKeyOf(report){
+  const d = toDateSafe(report.createdAt);
+  if(!d) return null;
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+function isWithinCurrentWindow(report){
+  const d = toDateSafe(report.createdAt);
+  if(!d) return true; // createdAtが無い古いデータも念のため現在ビューに含める
+  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+  return (Date.now() - d.getTime()) <= THIRTY_DAYS_MS;
+}
+function filterByPeriod(reports){
+  if(viewMode === 'current') return reports.filter(isWithinCurrentWindow);
+  if(!selectedMonthKey) return reports;
+  return reports.filter(r => monthKeyOf(r) === selectedMonthKey);
+}
+
+function renderMonthDots(){
+  const keys = new Set();
+  allReports.forEach(r => { const k = monthKeyOf(r); if(k) keys.add(k); });
+  // データが無い直近12ヶ月分も選べるように候補として加えておく
+  const now = new Date();
+  for(let i = 0; i < 12; i++){
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    keys.add(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'));
+  }
+  const sortedKeys = Array.from(keys).sort().reverse();
+  if(!selectedMonthKey && sortedKeys.length){
+    selectedMonthKey = sortedKeys[0];
+  }
+  monthDotsEl.innerHTML = sortedKeys.map(k => {
+    const [y, m] = k.split('-');
+    const hasData = allReports.some(r => monthKeyOf(r) === k);
+    const cls = 'month-dot' + (k === selectedMonthKey ? ' active' : '') + (hasData ? '' : ' empty');
+    return `<div class="${cls}" data-month="${k}"><span class="dot"></span>${y}年${m}月</div>`;
+  }).join('');
+}
+
+function setViewMode(mode){
+  viewMode = mode;
+  periodCurrentBtn.classList.toggle('active', mode === 'current');
+  periodTimelineBtn.classList.toggle('active', mode === 'timeline');
+  monthDotsEl.style.display = mode === 'timeline' ? 'flex' : 'none';
+  if(mode === 'timeline') renderMonthDots();
+  renderHeatGrid();
+  renderReportMarkers();
+}
+periodCurrentBtn.addEventListener('click', () => setViewMode('current'));
+periodTimelineBtn.addEventListener('click', () => setViewMode('timeline'));
+monthDotsEl.addEventListener('click', (e) => {
+  const dot = e.target.closest('.month-dot');
+  if(!dot) return;
+  selectedMonthKey = dot.dataset.month;
+  renderMonthDots();
+  renderHeatGrid();
+  renderReportMarkers();
+});
 
 /* ---------------------------------------------------------------------
    履歴ページなどから ?lat=..&lng=..&id=.. 付きで遷移してきた場合、
@@ -500,8 +599,8 @@ function renderHeatGrid(){
   if(heatLayerGroup){ map.removeLayer(heatLayerGroup); }
   heatLayerGroup = L.layerGroup();
 
-  // ヒートマップも現在選択中のカテゴリchipの絞り込みに従う
-  const targetReports = allReports.filter(r => {
+  // ヒートマップも現在選択中のカテゴリchip・期間（今/タイムライン）の絞り込みに従う
+  const targetReports = filterByPeriod(allReports).filter(r => {
     if(typeof r.lat !== 'number' || typeof r.lng !== 'number') return false;
     if(r.collected) return false; // 回収済みは密度に含めない
     return activeCategory === 'all' || r.category === activeCategory;
@@ -549,7 +648,7 @@ function renderReportMarkers(){
   if(map.getZoom() >= MARKER_MIN_ZOOM){
     // 回収済みでもピン自体は残す（ポップアップは引き続き見られるようにする。
     // ポップアップ内の「回収する」ボタンだけを buildPopupHtml 側で消す）
-    const targetReports = allReports.filter(r => {
+    const targetReports = filterByPeriod(allReports).filter(r => {
       if(typeof r.lat !== 'number' || typeof r.lng !== 'number') return false;
       return activeCategory === 'all' || r.category === activeCategory;
     });
@@ -586,6 +685,7 @@ function updateHeatLegendTitle(){
 function subscribeReports(){
   db.collection('reports').limit(1000).onSnapshot(snap => {
     allReports = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    if(viewMode === 'timeline') renderMonthDots();
     renderHeatGrid();
     renderReportMarkers();
     maybeJumpToReport();
